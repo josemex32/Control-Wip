@@ -112,14 +112,6 @@ def consultar_flujo_web(ppid):
     except Exception:
         pass
 
-    # Si por restricciones de red en la nube no se obtuvo el modelo, asignamos un respaldo temporal basado en el PPID o genérico para pruebas
-    if res["model_name"] == "N/D":
-        res["model_name"] = "MODELO-FOXCONN"
-    if res["next_station"] == "N/D":
-        res["next_station"] = "SMT-LINE"
-    if res["mo_number"] == "N/D":
-        res["mo_number"] = "MO-DEFAULT"
-
     return res
 
 
@@ -186,6 +178,16 @@ with tab_entradas:
                 f"Escanee el PPID para el Nivel {siguiente_nivel}:",
                 key="input_ppid_escaneo"
             )
+            
+            # Campos opcionales de respaldo por si la red interna no responde desde la nube
+            col_m, col_s, col_mo = st.columns(3)
+            with col_m:
+                manual_model = st.text_input("Modelo (Opcional):", value="", placeholder="Ej. LEO-PCB")
+            with col_s:
+                manual_station = st.text_input("Estación (Opcional):", value="", placeholder="Ej. SMT-01")
+            with col_mo:
+                manual_mo = st.text_input("MO Number (Opcional):", value="", placeholder="Ej. MO123456")
+
             submit_button = st.form_submit_button(label="Registrar Entrada")
 
         if submit_button and ppid_entrada:
@@ -208,157 +210,11 @@ with tab_entradas:
                 conn.close()
             else:
                 datos = consultar_flujo_web(ppid_clean)
-                fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                ubicacion_str = f"Col: {columna_sel} / Espacio: {siguiente_nivel}"
-
-                cursor.execute(
-                    """
-                        INSERT INTO inventario (ppid, tipo_tarjeta, columna, nivel_espacio, model_name, next_station, revision, mo_number, fecha_entrada)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ppid_clean,
-                        tipo_tarjeta,
-                        columna_sel,
-                        siguiente_nivel,
-                        datos["model_name"],
-                        datos["next_station"],
-                        datos["revision"],
-                        datos["mo_number"],
-                        fecha_actual,
-                    ),
-                )
-                cursor.execute(
-                    """
-                        INSERT INTO historial (tipo, ppid, tipo_tarjeta, ubicacion, model_name, mo_number, fecha_hora)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        "ENTRADA",
-                        ppid_clean,
-                        tipo_tarjeta,
-                        ubicacion_str,
-                        datos["model_name"],
-                        datos["mo_number"],
-                        fecha_actual,
-                    ),
-                )
-                conn.commit()
-                conn.close()
-
-                st.success(f"✅ Registrado: **{ppid_clean}** | Modelo: **{datos['model_name']}** | MO: **{datos['mo_number']}** | Estación: **{datos['next_station']}**")
-                st.rerun()
-    else:
-        st.error(f"❌ La columna/ubicación **{columna_sel}** está completamente llena.")
-
-    with st.expander(f"Ver estado actual de la columna {columna_sel}"):
-        if ocupados_dict:
-            df_col_status = pd.DataFrame(list(ocupados_dict.items()), columns=["Nivel / Espacio", "PPID Ocupado"])
-            df_col_status["Nivel_Num"] = pd.to_numeric(df_col_status["Nivel / Espacio"], errors="coerce")
-            df_col_status = df_col_status.sort_values("Nivel_Num").drop(columns=["Nivel_Num"])
-            st.dataframe(df_col_status, use_container_width=True)
-        else:
-            st.info("Esta columna está completamente vacía.")
-
-# ---------------------------------------------------------
-# 2. SALIDAS
-# ---------------------------------------------------------
-with tab_salidas:
-    st.subheader("Registro de Salidas de Material")
-    
-    with st.form(key="form_salida", clear_on_submit=True):
-        ppid_salida = st.text_input(
-            "Escanee o ingrese el PPID para SALIDA (se borrará del inventario):",
-            key="input_salida_form",
-        )
-        submit_salida = st.form_submit_button(label="Procesar Salida")
-
-    if submit_salida and ppid_salida:
-        ppid_raw = ppid_salida.strip().upper()
-        ppid_clean = ppid_raw.split()[-1] if len(ppid_raw) > 30 else ppid_raw
-
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT model_name, mo_number, tipo_tarjeta, columna, nivel_espacio, ppid FROM inventario WHERE UPPER(TRIM(ppid)) = ?", (ppid_clean,))
-        row = cursor.fetchone()
-
-        if row:
-            model_name, mo_number, tipo_tarjeta, columna, nivel_espacio, ppid_encontrado = row
-            fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ubicacion_str = f"Col: {columna} / Espacio: {nivel_espacio}"
-
-            cursor.execute("DELETE FROM inventario WHERE ppid = ?", (ppid_encontrado,))
-            cursor.execute(
-                """
-                    INSERT INTO historial (tipo, ppid, tipo_tarjeta, ubicacion, model_name, mo_number, fecha_hora)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                ("SALIDA", ppid_encontrado, tipo_tarjeta, ubicacion_str, model_name, mo_number, fecha_actual),
-            )
-            conn.commit()
-            conn.close()
-            st.success(f"OUT: PPID **{ppid_encontrado}** dado de salida y liberado de [{ubicacion_str}].")
-            st.rerun()
-        else:
-            conn.close()
-            st.warning(f"⚠️ El PPID **{ppid_clean}** no existe actualmente en el inventario.")
-
-# ---------------------------------------------------------
-# 3. INVENTARIO ACTUAL
-# ---------------------------------------------------------
-with tab_inventario:
-    st.subheader("Estado Actual del Inventario WIP")
-    conn = sqlite3.connect(DB_FILE)
-    df_inv = pd.read_sql_query("SELECT * FROM inventario", conn)
-    conn.close()
-
-    if not df_inv.empty:
-        st.metric("Total de Unidades en WIP", len(df_inv))
-        
-        st.markdown("### 📊 Resumen Dinámico: Total por Modelo y Estación")
-        
-        df_resumen = (
-            df_inv.groupby(["model_name", "next_station"])["ppid"]
-            .count()
-            .reset_index(name="QTY")
-            .rename(columns={"model_name": "Model_Name", "next_station": "Next_Station"})
-            .sort_values(by="QTY", ascending=False)
-        )
-        
-        st.dataframe(df_resumen, use_container_width=True)
-        st.markdown("---")
-
-        st.subheader("Detalle Completo del Inventario")
-        st.dataframe(df_inv, use_container_width=True)
-    else:
-        st.info("ℹ️ El inventario está actualmente vacío.")
-
-# ---------------------------------------------------------
-# 4. BÚSQUEDA / CONSULTAS
-# ---------------------------------------------------------
-with tab_busqueda:
-    st.subheader("Buscar Unidades en Inventario")
-    b_ppid = st.text_input("Filtrar por PPID:", key="filtro_busq_ppid")
-    conn = sqlite3.connect(DB_FILE)
-    query = "SELECT * FROM inventario WHERE 1=1"
-    params = []
-    if b_ppid:
-        query += " AND ppid LIKE ?"
-        params.append(f"%{b_ppid.strip().upper()}%")
-    df_busqueda = pd.read_sql_query(query, conn, params=params)
-    conn.close()
-    st.dataframe(df_busqueda, use_container_width=True)
-
-# ---------------------------------------------------------
-# 5. HISTORIAL
-# ---------------------------------------------------------
-with tab_historial:
-    st.subheader("Historial de Entradas y Salidas")
-    conn = sqlite3.connect(DB_FILE)
-    df_hist = pd.read_sql_query("SELECT * FROM historial ORDER BY id DESC", conn)
-    conn.close()
-    if not df_hist.empty:
-        st.dataframe(df_hist, use_container_width=True)
-    else:
-        st.info("ℹ️ No hay movimientos registrados todavía")
+                
+                # Prioridad a los datos ingresados manualmente si la red interna no responde
+                if manual_model.strip():
+                    datos["model_name"] = manual_model.strip().upper()
+                if manual_station.strip():
+                    datos["next_station"] = manual_station.strip().upper()
+                if manual_mo.strip():
+                    datos["mo_number"] = manual
